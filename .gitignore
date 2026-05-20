@@ -1,0 +1,7 @@
+.env
+*.xlsx
+~$*.xlsx
+used_cases.json
+__pycache__/
+*.pyc
+.claude/
