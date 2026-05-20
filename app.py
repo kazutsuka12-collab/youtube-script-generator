@@ -380,6 +380,26 @@ def add_used_case(theme: str, case: str) -> None:
     USED_CASES_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def create_excel_bytes(theme: str, case: str, script: str) -> bytes:
+    import io
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "台本履歴"
+    ws.append(EXCEL_HEADERS)
+    for col in range(1, 5):
+        ws.cell(1, col).font = openpyxl.styles.Font(bold=True)
+    ws.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), theme, case, script])
+    col_widths = [20, 30, 50, 60]
+    for col, width in zip(range(1, 5), col_widths):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def save_to_excel(theme: str, case: str, script: str) -> None:
     if EXCEL_PATH.exists():
         wb = openpyxl.load_workbook(EXCEL_PATH)
@@ -500,16 +520,24 @@ if st.session_state.get("script"):
     st.subheader("生成された台本")
     st.text_area("台本（400字程度）", st.session_state["script"], height=420)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
-            label="台本をテキストでダウンロード",
+            label="テキストでダウンロード",
             data=st.session_state["script"],
             file_name="script.txt",
             mime="text/plain",
         )
     with col2:
-        if st.button("Excelに保存", key="btn_excel"):
+        case = st.session_state.get("selected_case", "")
+        st.download_button(
+            label="Excelでダウンロード",
+            data=create_excel_bytes(theme, case, st.session_state["script"]),
+            file_name="台本履歴.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col3:
+        if st.button("Excelに保存（PC用）", key="btn_excel"):
             try:
                 case = st.session_state.get("selected_case", "")
                 save_to_excel(theme, case, st.session_state["script"])
