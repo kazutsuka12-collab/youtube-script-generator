@@ -432,6 +432,29 @@ def save_to_excel(theme: str, case: str, script: str) -> None:
     wb.save(EXCEL_PATH)
 
 
+def save_to_notion(theme: str, case: str, script: str) -> None:
+    from notion_client import Client
+    token = _get_secret("NOTION_TOKEN")
+    database_id = _get_secret("NOTION_DATABASE_ID")
+    if not token or not database_id:
+        raise ValueError("NOTION_TOKEN または NOTION_DATABASE_ID が設定されていません。")
+    notion = Client(auth=token)
+
+    def rich_text(content: str) -> list:
+        return [{"text": {"content": content[:2000]}}]
+
+    notion.pages.create(
+        parent={"database_id": database_id},
+        properties={
+            "台本タイトル": {"title": rich_text(theme)},
+            "保存日時": {"rich_text": rich_text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))},
+            "テーマ": {"rich_text": rich_text(theme)},
+            "事例": {"rich_text": rich_text(case[:2000])},
+            "台本": {"rich_text": rich_text(script[:2000])},
+        },
+    )
+
+
 def refine_script(current_script: str, instructions: str) -> str:
     client = get_claude_client()
 
@@ -537,12 +560,12 @@ if st.session_state.get("script"):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     with col3:
-        if st.button("Excelに保存（PC用）", key="btn_excel"):
+        if st.button("Notionに保存", key="btn_notion"):
             try:
                 case = st.session_state.get("selected_case", "")
-                save_to_excel(theme, case, st.session_state["script"])
+                save_to_notion(theme, case, st.session_state["script"])
                 add_used_case(theme, case)
-                st.success(f"保存しました → {EXCEL_PATH}")
+                st.success("Notionに保存しました！")
             except Exception as e:
                 st.error(f"保存エラー: {e}")
 
