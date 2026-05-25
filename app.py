@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import anthropic
 from google import genai
@@ -338,13 +339,95 @@ def step2_research_case(case_description: str) -> str:
     return response.text
 
 
-def step3_generate_script(cases_outline: str, research: str) -> str:
+def step1b_generate_hypothesis(case_description: str) -> str:
+    client = get_gemini_client()
+    prompt = f"""あなたはYouTubeショート動画のプロデューサーです。
+以下の事例に対して、動画の仮説を一文で作成してください。
+
+【事例】
+{case_description}
+
+【テンプレート】
+「この動画は、【誰に】／【どんな感情】を起こすために、【冒頭の一言・見せ方】で掴み、【どんな結末や転換】で心を動かし、最後に【どんな問い】で言葉を引き出す。」
+
+条件：
+- "なぜその視聴者の心が動くのか"を必ず明示すること
+- 「話題だから伸びそう」「有名人だから伸びそう」といった表面的な理由はNG
+- 具体的なターゲット視聴者・感情・冒頭の掴み・転換・締めの問いを盛り込む
+- 一文（または2〜3文の箇条書き形式）で言い切ること
+
+仮説のみを出力してください。前置きや説明は不要です。"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+    )
+    return response.text.strip()
+
+
+def step2b_generate_framework(case: str, research: str, hypothesis: str) -> dict:
+    client = get_gemini_client()
+    prompt = f"""あなたはYouTubeショート動画のプロデューサーです。
+以下の情報をもとに、動画制作の4点フレームワークを生成してください。
+
+【事例】
+{case}
+
+【調査結果】
+{research}
+
+【動画の仮説】
+{hypothesis}
+
+以下の4点それぞれについて、具体的な案を1〜2文で記載してください。
+
+**ファーストビュー**：主語と状況が一目で分かる・動きがある・強い言葉を1つ置く
+例：「電車内で"まさか"の一言」「外国人が引くほど驚いた日本の○○」
+
+**約束**：「この先で○○が分かります／ひっくり返ります」と宣言する（わざと約束をしないパターンも可）
+
+**見せ場**：事実や描写をサクッと重ね、意外性や逆転で気持ちを動かす
+
+**余韻**：二択・体験共有・価値判断のどれかでコメントを誘う
+例：「注意すべき／静観すべき、あなたはどっち？」
+
+以下のJSON形式のみを出力してください（説明不要）：
+{{
+  "first_view": "...",
+  "promise": "...",
+  "highlight": "...",
+  "lingering": "..."
+}}"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+    )
+    text = response.text.strip()
+    text = re.sub(r'^```(?:json)?\n?', '', text)
+    text = re.sub(r'\n?```$', '', text)
+    return json.loads(text)
+
+
+def step3_generate_script(case_outline: str, research: str, hypothesis: str = "", framework: dict | None = None) -> str:
     client = get_claude_client()
 
-    user_message = f"""という内容のショート動画の台本を以下の記事を参考にして生成してください。字数は400字程度にしてください。
+    hypothesis_block = f"\n\n【動画の仮説（一文）】\n{hypothesis}" if hypothesis.strip() else ""
 
-【Geminiが立案した事例】
-{cases_outline}
+    framework_block = ""
+    if framework:
+        framework_block = f"""
+
+【4点フレームワーク（制作指針）】
+- ファーストビュー：{framework.get('first_view', '')}
+- 約束：{framework.get('promise', '')}
+- 見せ場：{framework.get('highlight', '')}
+- 余韻：{framework.get('lingering', '')}"""
+
+    user_message = f"""という内容のショート動画の台本を以下の記事を参考にして生成してください。字数は400字程度にしてください。{hypothesis_block}{framework_block}
+
+【選択した事例】
+{case_outline}
 
 【詳細調査結果（Gemini + Google検索）】
 {research}"""
@@ -499,43 +582,160 @@ theme = st.text_input(
 
 st.divider()
 
-# ---- ワンクリック生成 ----
-if st.button("台本を生成する", type="primary", key="btn_generate", use_container_width=True):
-    st.session_state.pop("cases", None)
-    st.session_state.pop("research", None)
-    st.session_state.pop("script", None)
-    st.session_state.pop("selected_case", None)
+def _parse_cases(cases_text: str) -> list[str]:
+    parts = re.split(r'【事例\d+】', cases_text)
+    return [p.strip() for p in parts if p.strip()]
+
+def _case_label(case_text: str, index: int) -> str:
+    for line in case_text.split('\n'):
+        if '動画タイトル案' in line:
+            title = line.split('：', 1)[-1].strip().lstrip('「').rstrip('」')
+            if title:
+                return f"事例{index + 1}：{title}"
+    return f"事例{index + 1}"
+
+
+# ---- Phase 1: 事例立案 ----
+if st.button("事例を立案する", type="primary", key="btn_step1", use_container_width=True):
+    for k in ("cases", "case_options", "selected_case", "hypothesis_draft", "research", "script"):
+        st.session_state.pop(k, None)
 
     try:
         with st.status("Step 1　事例を立案中（Gemini）...", expanded=True) as status:
             cases = step1_generate_cases(theme)
             st.session_state["cases"] = cases
-            # 【事例2】より前の部分を自動選択
-            first_case = cases.split("【事例2】")[0].strip()
-            st.session_state["selected_case"] = first_case
+            st.session_state["case_options"] = _parse_cases(cases)
             status.update(label="Step 1　事例の立案完了", state="complete")
-
-        with st.status("Step 2　事例を調査中（Gemini + Google検索）...", expanded=True) as status:
-            research = step2_research_case(first_case)
-            st.session_state["research"] = research
-            status.update(label="Step 2　調査完了", state="complete")
-
-        with st.status("Step 3　台本を執筆中（Claude）...", expanded=True) as status:
-            script = step3_generate_script(cases, research)
-            st.session_state["script"] = script
-            status.update(label="Step 3　台本生成完了", state="complete")
-
     except Exception as e:
         st.error(f"エラー: {e}")
 
-# ---- 中間結果（折りたたみ） ----
-if st.session_state.get("cases"):
-    with st.expander("立案された事例（Gemini）", expanded=False):
-        st.text(st.session_state["cases"])
+# ---- Phase 1.5: 事例選択 + 仮説入力 ----
+if st.session_state.get("case_options"):
+    st.divider()
+    st.subheader("事例を選択")
+
+    options = st.session_state["case_options"]
+    labels = [_case_label(opt, i) for i, opt in enumerate(options)]
+    selected_idx = st.radio("使用する事例を選んでください", range(len(options)), format_func=lambda x: labels[x], key="case_radio")
+    selected_case = options[selected_idx]
+    st.session_state["selected_case"] = selected_case
+
+    with st.expander("選択した事例の詳細", expanded=False):
+        st.text(selected_case)
+
+    st.divider()
+    st.subheader("動画の仮説（投稿前チェック）")
+    st.caption(
+        "テンプレート：「この動画は、【誰に】／【どんな感情】を起こすために、【冒頭の一言・見せ方】で掴み、"
+        "【どんな結末や転換】で心を動かし、最後に【どんな問い】で言葉を引き出す。」"
+    )
+
+    col_hyp_btn, _ = st.columns([1, 3])
+    with col_hyp_btn:
+        if st.button("仮説を自動生成", key="btn_gen_hypothesis"):
+            with st.spinner("仮説を生成中..."):
+                try:
+                    st.session_state["hypothesis_input"] = step1b_generate_hypothesis(selected_case)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+
+    hypothesis = st.text_area(
+        "仮説を入力（または自動生成してから編集）",
+        height=110,
+        placeholder='例：「通勤中の流し見層に"驚き"を起こす。冒頭で断定の一言→中盤で意外な事実→最後は"あなたはどう思う？"の二択でコメントを促す。」',
+        key="hypothesis_input",
+    )
+
+    # ---- Phase 2: 調査 ----
+    st.divider()
+    if st.button("調査する", type="primary", key="btn_step2", use_container_width=True, disabled=not hypothesis.strip()):
+        st.session_state.pop("research", None)
+        st.session_state.pop("framework", None)
+        st.session_state.pop("script", None)
+
+        try:
+            with st.status("Step 2　事例を調査中（Gemini + Google検索）...", expanded=True) as status:
+                research = step2_research_case(selected_case)
+                st.session_state["research"] = research
+                status.update(label="Step 2　調査完了", state="complete")
+        except Exception as e:
+            st.error(f"エラー: {e}")
 
 if st.session_state.get("research"):
     with st.expander("調査結果（Gemini + Google検索）", expanded=False):
         st.text(st.session_state["research"])
+
+    # ---- Phase 2.5: 4点フレームワーク ----
+    st.divider()
+    st.subheader("4点フレームワーク（制作チェック）")
+
+    col_fw_btn, _ = st.columns([1, 3])
+    with col_fw_btn:
+        if st.button("フレームワークを自動生成", key="btn_gen_framework"):
+            with st.spinner("フレームワークを生成中..."):
+                try:
+                    fw = step2b_generate_framework(
+                        st.session_state.get("selected_case", ""),
+                        st.session_state["research"],
+                        st.session_state.get("hypothesis_input", ""),
+                    )
+                    st.session_state["fw_first_view"] = fw.get("first_view", "")
+                    st.session_state["fw_promise"] = fw.get("promise", "")
+                    st.session_state["fw_highlight"] = fw.get("highlight", "")
+                    st.session_state["fw_lingering"] = fw.get("lingering", "")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+
+    fw_first_view = st.text_area(
+        "ファーストビュー（最初のひと言と見せ方）",
+        height=80,
+        placeholder='例：「外国人が引くほど驚いた日本の○○」「電車内で"まさか"の一言」',
+        key="fw_first_view",
+    )
+    fw_promise = st.text_area(
+        "約束（何が起きる？何が得られる？）",
+        height=80,
+        placeholder='例：「この先でひっくり返ります」※約束しないパターンも可',
+        key="fw_promise",
+    )
+    fw_highlight = st.text_area(
+        "見せ場（期待の回収・転換）",
+        height=80,
+        placeholder="事実や描写をサクッと重ね、意外性・逆転で気持ちを動かす",
+        key="fw_highlight",
+    )
+    fw_lingering = st.text_area(
+        "余韻（言葉を引き出す問い）",
+        height=80,
+        placeholder='例：「注意すべき／静観すべき、あなたはどっち？」',
+        key="fw_lingering",
+    )
+
+    # ---- Phase 3: 台本生成 ----
+    st.divider()
+    current_framework = {
+        "first_view": fw_first_view,
+        "promise": fw_promise,
+        "highlight": fw_highlight,
+        "lingering": fw_lingering,
+    }
+    if st.button("台本を生成する", type="primary", key="btn_step3", use_container_width=True):
+        st.session_state.pop("script", None)
+        hypothesis_val = st.session_state.get("hypothesis_input", "")
+        try:
+            with st.status("Step 3　台本を執筆中（Claude）...", expanded=True) as status:
+                script = step3_generate_script(
+                    st.session_state.get("selected_case", ""),
+                    st.session_state["research"],
+                    hypothesis_val,
+                    current_framework,
+                )
+                st.session_state["script"] = script
+                status.update(label="Step 3　台本生成完了", state="complete")
+        except Exception as e:
+            st.error(f"エラー: {e}")
 
 # ---- 台本 ----
 if st.session_state.get("script"):
